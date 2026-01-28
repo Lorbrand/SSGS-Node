@@ -3,7 +3,7 @@
     Lorbrand Sensor Seal Gateway Server
     --------------------------------------------------------------
 
-    Copyright (C) 2023-2024 Lorbrand (Pty) Ltd
+    Copyright (C) 2023-2026 Lorbrand (Pty) Ltd
 
     https://github.com/Lorbrand/SSGS-Node#readme
 
@@ -31,6 +31,7 @@ const RETRANSMISSION_TIMEOUT_MS = 2000;
 const LAST_SEEN_TIMEOUT_MS = 30000; // if a client has not been seen for this long, it is removed from the connectedClients list
 const RETRANSMISSIONS_PER_CLIENT_PER_TICK = 10;
 const NUM_PACKET_IDS = 65536; // 2^16
+const AUTH_CHECK_TIMEOUT_MS = 5000; // if a client is not authorized within this time, it is removed from the checkingAuthorizationFor list
 
 import * as dgram from 'node:dgram';
 import * as fs from 'node:fs/promises';
@@ -45,6 +46,8 @@ import { ParsedMessage } from './ssgscp/ssprotocols.js';
 import SSProtocols from './ssgscp/ssprotocols.js';
 
 import { assert } from 'node:console';
+import { Buffer } from "node:buffer";
+
 
 type ConfigFile = {
     key: string;
@@ -118,6 +121,7 @@ class SSGS {
     configFile: ConfigFile; // the configuration file object
     authorizedGateways: Array<AuthorizedGateway>; // the list of authorized gateways
     connectedClients: Array<Client>; // the list of connected clients
+    checkingAuthorizationFor: Array<{ gatewayUID: Buffer, timestamp: number }>; // the list of gateways that are being checked for authorization
 
     /**
      * @constructor
@@ -134,6 +138,7 @@ class SSGS {
         this.configFile = null;
         this.authorizedGateways = [];
         this.connectedClients = [];
+        this.checkingAuthorizationFor = [];
 
         if (options && options.debug) {
             console.log('SSGS: Debug mode enabled');
@@ -182,7 +187,7 @@ class SSGS {
             for (const sentMessage of client.sentMessages) {
                 if (retransmittedCount < RETRANSMISSIONS_PER_CLIENT_PER_TICK && now - sentMessage.timestamp > client.retransmissionTimeout) {
                     // retransmit the message
-                    this.socket.send(sentMessage.packet, client.sourcePort, client.remoteAddress, (err) => {
+                    this.socket.send(new Uint8Array(sentMessage.packet), client.sourcePort, client.remoteAddress, (err) => {
                         if (err)
                             logIfSSGSDebug('Error: Could not send packet: ' + err);
                     });
@@ -206,6 +211,12 @@ class SSGS {
                 logIfSSGSDebug('Client ' + SSGS.uidToString(client.gatewayUID) + ' removed due to inactivity');
             }
 
+        }
+
+        for (let i = 0; i < this.checkingAuthorizationFor.length; i++) {
+            if (now - this.checkingAuthorizationFor[i].timestamp > AUTH_CHECK_TIMEOUT_MS) {
+                this.checkingAuthorizationFor.splice(i, 1);
+            }
         }
 
     }
@@ -249,7 +260,7 @@ class SSGS {
             return;
         }
 
-        this.socket.send(packedPacket, client.sourcePort, client.remoteAddress, (err) => {
+        this.socket.send(new Uint8Array(packedPacket), client.sourcePort, client.remoteAddress, (err) => {
             if (err) {
                 logIfSSGSDebug('Error: Could not send packet: ' + err);
             }
@@ -296,6 +307,43 @@ class SSGS {
 
     /**
      * @method
+     * @param {Buffer} gatewayUID - the gateway UID to check
+     * @returns {boolean} - true if the gateway UID is being checked for authorization, false otherwise
+     * Checks if the gateway UID is being checked for authorization
+     */
+    isCheckingAuthorizationFor(gatewayUID: Buffer): boolean {
+        return this.checkingAuthorizationFor.find((c) => SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID)) ? true : false;
+    }
+
+    /**
+     * @method
+     * @param {Buffer} gatewayUID - the gateway UID to set as checking for authorization
+     * Sets the gateway UID as checking for authorization
+     */
+    setCheckingAuthorizationFor(gatewayUID: Buffer) {
+        const existing = this.checkingAuthorizationFor.find((c) => SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID));
+        if (!existing) {
+            this.checkingAuthorizationFor.push({ gatewayUID, timestamp: Date.now() });
+            return;
+        }
+
+        existing.timestamp = Date.now();
+    }
+
+    /**
+     * @method
+     * @param {Buffer} gatewayUID - the gateway UID to remove from checking for authorization
+     * Removes the gateway UID from checking for authorization
+     */
+    removeCheckingAuthorizationFor(gatewayUID: Buffer) {
+        const index = this.checkingAuthorizationFor.findIndex((c) => SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID));
+        if (index != -1) {
+            this.checkingAuthorizationFor.splice(index, 1);
+        }
+    }
+
+/**
+     * @method
      * @param {object} parsedPacket - the parsed packet object from SSGSCP.parseSSGSCP
      * @param {object} rinfo - the remote address information from the UDP socket
      * Processes the incoming packet and calls the onmessage callback function
@@ -309,52 +357,72 @@ class SSGS {
         }
 
         // try find the Client state machine for this gateway client (in connectedClients)
-        const client = this.connectedClients.find((c) => SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID));
+        let client = this.connectedClients.find((c) => SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID));
 
         let callbackProvidedKey: Buffer | null = null;
 
-        if (!client) { // client not found, check if gateway is authorized
+        if (!client && !this.isCheckingAuthorizationFor(gatewayUID)) { // client not found, check if gateway is authorized
+            this.setCheckingAuthorizationFor(gatewayUID);
+            
+            // Note: We keep the CheckingAuthorizationFor flag active until the very end of the connection process
+            // to prevent race conditions where multiple CONN packets try to authorize simultaneously.
+
             if (!this.isAuthorizedGateway(gatewayUID)) {
                 logIfSSGSDebug('Connecting gateway is not authorized in config, trying onconnectionattempt callback');
 
                 callbackProvidedKey = await this.onconnectionattempt(gatewayUID, rinfo.address, rinfo.port);
+                
                 if (!callbackProvidedKey) {
                     logIfSSGSDebug('onconnectionattempt did not authorize gateway UID: ' + SSGS.uidToString(gatewayUID) + ' from address: ' + rinfo.address);
                     this.sendCONNFAIL(rinfo, gatewayUID);
+                    this.removeCheckingAuthorizationFor(gatewayUID);
                     return;
                 }
 
                 logIfSSGSDebug('onconnectionattempt authorized gateway UID: ' + SSGS.uidToString(gatewayUID) + ' from address: ' + rinfo.address);
+                // CRITICAL: We do NOT removeCheckingAuthorizationFor here. We wait until the client is added.
             }
         }
 
         // first try get the key from the config file, if not found, try get it from the callback, if not found, try get it from the client object (if it exists)
         const key = this.getGatewayKey(gatewayUID) ?? callbackProvidedKey ?? client?.key;
         if (!key) {
-            logIfSSGSDebug('Error: Could not find key for gateway UID: ' + gatewayUID);
+            // Only log if we aren't currently checking auth (prevent log spam during auth process)
+            // But if we are here and have no key, we failed.
+            logIfSSGSDebug('Error: Could not find key for gateway UID: ' + SSGS.uidToString(gatewayUID));
+            this.removeCheckingAuthorizationFor(gatewayUID); 
             return;
         }
 
         // try parse the packet using the key
+        // This is ASYNC. A race condition can occur here if we aren't careful.
         const parsedPacket = await SSGSCP.parseSSGSCP(datagram, key);
 
         if (!parsedPacket) { // could not parse the packet
-            logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Error: Could not parse packet: ' + SSGSCP.errMsg);
+            logIfSSGSDebug(SSGS.uidToString(gatewayUID) + ': ' + 'Error: Could not parse packet: ' + SSGSCP.errMsg);
             this.sendCONNFAIL(rinfo, gatewayUID);
+            this.removeCheckingAuthorizationFor(gatewayUID);
             return;
         }
 
         if (!parsedPacket.authSuccess) { // could not authenticate the packet using the key (invalid Message Authentication Code)
             logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Error: Could not authenticate gateway');
             this.sendCONNFAIL(rinfo, gatewayUID);
+            this.removeCheckingAuthorizationFor(gatewayUID);
             return;
         }
 
-        // if the client is not found, this is a new connection, so we need to add it to the connectedClients list
+        // if the client was not found initially, check again now.
+        // Another packet might have created the client while we were awaiting parseSSGSCP.
+        if (!client) {
+             client = this.connectedClients.find((c) => SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID));
+        }
+
+        // if the client is still not found, this is a new connection, so we need to add it to the connectedClients list
         if (!client) {
             if (parsedPacket.packetType === PacketType.CONN) {
-                this.sendCONNACPT(rinfo, Buffer.from(key), parsedPacket.gatewayUID);
-                const client: Client = {
+                this.sendCONNACPT(rinfo, key, parsedPacket.gatewayUID);
+                const newClient: Client = {
                     gatewayUID: parsedPacket.gatewayUID,
                     sourcePort: rinfo.port,
                     remoteAddress: rinfo.address,
@@ -364,28 +432,39 @@ class SSGS {
                     retransmissionTimeout: RETRANSMISSION_TIMEOUT_MS,
                     sentMessages: [],
                     receivedMessageIDsFIFO: [],
-                    key: Buffer.from(key),
+                    key: key,
                     onmessage: (parsedMessage: ParsedMessage) => { },
                     onupdate: (parsedUpdate: SensorSealUpdate) => { },
                     onreconnect: () => { },
                     ondisconnect: () => { },
                     send: async (payload: Buffer) => {
-                        return await this.sendMSG(client, PacketType.MSGCONF, payload);
+                        return await this.sendMSG(newClient, PacketType.MSGCONF, payload);
                     }
                 };
 
-                this.connectedClients.push(client);
-                this.onconnection(client);
+                this.connectedClients.push(newClient);
+                this.onconnection(newClient);
+                
+                // CRITICAL: Now that the client is safely in the list, we remove the protection flag.
+                this.removeCheckingAuthorizationFor(gatewayUID);
+                
                 logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'New client connected');
                 return;
             } else {
                 logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Error: Client not found in connectedClients and packet type is not CONN');
                 this.sendCONNFAIL(rinfo, parsedPacket.gatewayUID);
+                this.removeCheckingAuthorizationFor(gatewayUID);
                 return;
             }
         }
+        
+        // If we found the client (either initially or after the race check), clear the auth flag just in case
+        this.removeCheckingAuthorizationFor(gatewayUID);
 
         client.lastSeen = Date.now();
+        // Update IP/Port in case the client roamed
+        client.remoteAddress = rinfo.address;
+        client.sourcePort = rinfo.port;
 
         logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Received packet: ' + JSON.stringify(parsedPacket));
 
@@ -404,7 +483,7 @@ class SSGS {
                 logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Warning: Received CONN packet from already connected client, assuming client restarted');
 
                 // send CONNACPT to client to indicate that we received the packet
-                this.sendCONNACPT(rinfo, Buffer.from(key), parsedPacket.gatewayUID);
+                this.sendCONNACPT(rinfo, key, parsedPacket.gatewayUID);
 
                 setTimeout(() => {
                     client.onreconnect();
@@ -445,7 +524,7 @@ class SSGS {
                     logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Warning: Received duplicate MSGSTATUS packet ID ' + parsedPacket.packetID);
 
                     // send RCPTOK to client to indicate that we received the packet
-                    this.sendRCPTOK(parsedPacket.packetID, rinfo, Buffer.from(key), parsedPacket.gatewayUID);
+                    this.sendRCPTOK(parsedPacket.packetID, rinfo, key, parsedPacket.gatewayUID);
 
                     return;
                 } else {
@@ -456,7 +535,7 @@ class SSGS {
                 }
 
                 // send RCPTOK to client to indicate that we received the packet
-                this.sendRCPTOK(parsedPacket.packetID, rinfo, Buffer.from(key), parsedPacket.gatewayUID);
+                this.sendRCPTOK(parsedPacket.packetID, rinfo, key, parsedPacket.gatewayUID);
 
                 // try parse from a variety of SSGSCP MSG payload formats
                 const parsedMessage = SSProtocols.parse(parsedPacket);
@@ -522,7 +601,7 @@ class SSGS {
         // CONNFAIL packets are not encrypted
 
         const packedPacket = await SSGSCP.packSSGSCP(fields, Buffer.alloc(32));
-        this.socket.send(packedPacket, rinfo.port, rinfo.address);
+        this.socket.send(new Uint8Array(packedPacket), rinfo.port, rinfo.address);
     }
 
     /**
@@ -539,7 +618,7 @@ class SSGS {
         };
 
         const packedPacket = await SSGSCP.packSSGSCP(fields, key);
-        this.socket.send(packedPacket, rinfo.port, rinfo.address);
+        this.socket.send(new Uint8Array(packedPacket), rinfo.port, rinfo.address);
         logIfSSGSDebug('Sent CONNACPT to ' + rinfo.address + ':' + rinfo.port);
     }
 
@@ -557,7 +636,7 @@ class SSGS {
         };
 
         const packedPacket = await SSGSCP.packSSGSCP(fields, key);
-        this.socket.send(packedPacket, rinfo.port, rinfo.address);
+        this.socket.send(new Uint8Array(packedPacket), rinfo.port, rinfo.address);
     }
 
     /**
@@ -651,7 +730,7 @@ class SSGS {
         if (!gatewayUID1 || !gatewayUID2) // should not be null or undefined
             return false;
 
-        if (gatewayUID1.length != 4 && gatewayUID2.length != 4) // should be 4 bytes long
+        if (gatewayUID1.length != 4 || gatewayUID2.length != 4) // should be 4 bytes long
             return false;
 
         // compare each byte

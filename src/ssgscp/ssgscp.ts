@@ -1,5 +1,7 @@
 
 import * as crypto from 'node:crypto';
+import { Buffer } from "node:buffer";
+
 
 // Define the SSGSCP packet types
 export const enum PacketType {
@@ -107,7 +109,7 @@ export class SSGSCP {
 
         const importedKey = await crypto.subtle.importKey(
             "raw",
-            key,
+            new Uint8Array(key),
             "AES-CTR",
             true,
             ["encrypt", "decrypt"]
@@ -161,7 +163,7 @@ export class SSGSCP {
         // const decryptedPortion = Buffer.concat([decrypted, final]);
         const importedKey = await crypto.subtle.importKey(
             "raw",
-            key,
+            new Uint8Array(key),
             "AES-CTR",
             true,
             ["encrypt", "decrypt"]
@@ -174,7 +176,7 @@ export class SSGSCP {
                 length: 64
             },
             importedKey,
-            encryptedPortion
+            new Uint8Array(encryptedPortion)
         ));
 
         // Extract the fields from the decrypted portion

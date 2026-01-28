@@ -1,10 +1,9 @@
-/// <reference types="node" />
-/// <reference types="node" />
 import * as dgram from 'node:dgram';
 import { PacketType } from './ssgscp/ssgscp.js';
 import { MessageSubtype } from './ssgscp/ssgscp.js';
 import { SensorSealUpdate } from './ssgscp/ssprotocols.js';
 import { ParsedMessage } from './ssgscp/ssprotocols.js';
+import { Buffer } from "node:buffer";
 type ConfigFile = {
     key: string;
     authorized_gateways: Array<{
@@ -73,6 +72,10 @@ declare class SSGS {
     configFile: ConfigFile;
     authorizedGateways: Array<AuthorizedGateway>;
     connectedClients: Array<Client>;
+    checkingAuthorizationFor: Array<{
+        gatewayUID: Buffer;
+        timestamp: number;
+    }>;
     /**
      * @constructor
      * @param {number} port - the UDP port number to listen for SSGSCP packets, default is 1818
@@ -113,10 +116,29 @@ declare class SSGS {
     sendMSG(client: Client, packetType: PacketType, payload: Buffer): Promise<boolean>;
     /**
      * @method
-     * @param {object} parsedPacket - the parsed packet object from SSGSCP.parseSSGSCP
-     * @param {object} rinfo - the remote address information from the UDP socket
-     * Processes the incoming packet and calls the onmessage callback function
+     * @param {Buffer} gatewayUID - the gateway UID to check
+     * @returns {boolean} - true if the gateway UID is being checked for authorization, false otherwise
+     * Checks if the gateway UID is being checked for authorization
      */
+    isCheckingAuthorizationFor(gatewayUID: Buffer): boolean;
+    /**
+     * @method
+     * @param {Buffer} gatewayUID - the gateway UID to set as checking for authorization
+     * Sets the gateway UID as checking for authorization
+     */
+    setCheckingAuthorizationFor(gatewayUID: Buffer): void;
+    /**
+     * @method
+     * @param {Buffer} gatewayUID - the gateway UID to remove from checking for authorization
+     * Removes the gateway UID from checking for authorization
+     */
+    removeCheckingAuthorizationFor(gatewayUID: Buffer): void;
+    /**
+         * @method
+         * @param {object} parsedPacket - the parsed packet object from SSGSCP.parseSSGSCP
+         * @param {object} rinfo - the remote address information from the UDP socket
+         * Processes the incoming packet and calls the onmessage callback function
+         */
     process(datagram: Buffer, rinfo: dgram.RemoteInfo): Promise<void>;
     /**
      * @method

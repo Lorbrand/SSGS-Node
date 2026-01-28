@@ -3,7 +3,7 @@
     Lorbrand Sensor Seal Gateway Server
     --------------------------------------------------------------
 
-    Copyright (C) 2023-2024 Lorbrand (Pty) Ltd
+    Copyright (C) 2023-2026 Lorbrand (Pty) Ltd
 
     https://github.com/Lorbrand/SSGS-Node#readme
 
@@ -31,8 +31,8 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 var __generator = (this && this.__generator) || function (thisArg, body) {
-    var _ = { label: 0, sent: function() { if (t[0] & 1) throw t[1]; return t[1]; }, trys: [], ops: [] }, f, y, t, g;
-    return g = { next: verb(0), "throw": verb(1), "return": verb(2) }, typeof Symbol === "function" && (g[Symbol.iterator] = function() { return this; }), g;
+    var _ = { label: 0, sent: function() { if (t[0] & 1) throw t[1]; return t[1]; }, trys: [], ops: [] }, f, y, t, g = Object.create((typeof Iterator === "function" ? Iterator : Object).prototype);
+    return g.next = verb(0), g["throw"] = verb(1), g["return"] = verb(2), typeof Symbol === "function" && (g[Symbol.iterator] = function() { return this; }), g;
     function verb(n) { return function (v) { return step([n, v]); }; }
     function step(op) {
         if (f) throw new TypeError("Generator is already executing.");
@@ -65,11 +65,13 @@ var RETRANSMISSION_TIMEOUT_MS = 2000;
 var LAST_SEEN_TIMEOUT_MS = 30000; // if a client has not been seen for this long, it is removed from the connectedClients list
 var RETRANSMISSIONS_PER_CLIENT_PER_TICK = 10;
 var NUM_PACKET_IDS = 65536; // 2^16
+var AUTH_CHECK_TIMEOUT_MS = 5000; // if a client is not authorized within this time, it is removed from the checkingAuthorizationFor list
 import * as dgram from 'node:dgram';
 import * as fs from 'node:fs/promises';
 import { SSGSCP } from './ssgscp/ssgscp.js';
 import SSProtocols from './ssgscp/ssprotocols.js';
 import { assert } from 'node:console';
+import { Buffer } from "node:buffer";
 var SSGS = /** @class */ (function () {
     /**
      * @constructor
@@ -90,6 +92,7 @@ var SSGS = /** @class */ (function () {
         this.configFile = null;
         this.authorizedGateways = [];
         this.connectedClients = [];
+        this.checkingAuthorizationFor = [];
         if (options && options.debug) {
             console.log('SSGS: Debug mode enabled');
             __SSGS_DEBUG = true;
@@ -141,7 +144,7 @@ var SSGS = /** @class */ (function () {
                 var sentMessage = _c[_b];
                 if (retransmittedCount < RETRANSMISSIONS_PER_CLIENT_PER_TICK && now - sentMessage.timestamp > client.retransmissionTimeout) {
                     // retransmit the message
-                    this.socket.send(sentMessage.packet, client.sourcePort, client.remoteAddress, function (err) {
+                    this.socket.send(new Uint8Array(sentMessage.packet), client.sourcePort, client.remoteAddress, function (err) {
                         if (err)
                             logIfSSGSDebug('Error: Could not send packet: ' + err);
                     });
@@ -160,6 +163,11 @@ var SSGS = /** @class */ (function () {
             if (now - client.lastSeen > LAST_SEEN_TIMEOUT_MS) {
                 this.removeClient(client);
                 logIfSSGSDebug('Client ' + SSGS.uidToString(client.gatewayUID) + ' removed due to inactivity');
+            }
+        }
+        for (var i = 0; i < this.checkingAuthorizationFor.length; i++) {
+            if (now - this.checkingAuthorizationFor[i].timestamp > AUTH_CHECK_TIMEOUT_MS) {
+                this.checkingAuthorizationFor.splice(i, 1);
             }
         }
     };
@@ -204,7 +212,7 @@ var SSGS = /** @class */ (function () {
                             logIfSSGSDebug('Error: Could not pack packet: ' + SSGSCP.errMsg);
                             return [2 /*return*/];
                         }
-                        this.socket.send(packedPacket, client.sourcePort, client.remoteAddress, function (err) {
+                        this.socket.send(new Uint8Array(packedPacket), client.sourcePort, client.remoteAddress, function (err) {
                             if (err) {
                                 logIfSSGSDebug('Error: Could not send packet: ' + err);
                             }
@@ -214,10 +222,10 @@ var SSGS = /** @class */ (function () {
                         });
                         sentMessage = {
                             packetID: client.sendPacketID,
-                            timestamp: Date.now(),
+                            timestamp: Date.now(), // the timestamp of when the message was sent
                             packet: packedPacket,
-                            resolve: resolve,
-                            receivedOk: false,
+                            resolve: resolve, // called when the RCPTOK packet is received
+                            receivedOk: false, // set to true when the RCPTOK packet is received
                             retransmissionCount: 0 // the number of times the message has been retransmitted
                         };
                         client.sentMessages.push(sentMessage);
@@ -245,15 +253,48 @@ var SSGS = /** @class */ (function () {
     };
     /**
      * @method
-     * @param {object} parsedPacket - the parsed packet object from SSGSCP.parseSSGSCP
-     * @param {object} rinfo - the remote address information from the UDP socket
-     * Processes the incoming packet and calls the onmessage callback function
+     * @param {Buffer} gatewayUID - the gateway UID to check
+     * @returns {boolean} - true if the gateway UID is being checked for authorization, false otherwise
+     * Checks if the gateway UID is being checked for authorization
      */
+    SSGS.prototype.isCheckingAuthorizationFor = function (gatewayUID) {
+        return this.checkingAuthorizationFor.find(function (c) { return SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID); }) ? true : false;
+    };
+    /**
+     * @method
+     * @param {Buffer} gatewayUID - the gateway UID to set as checking for authorization
+     * Sets the gateway UID as checking for authorization
+     */
+    SSGS.prototype.setCheckingAuthorizationFor = function (gatewayUID) {
+        var existing = this.checkingAuthorizationFor.find(function (c) { return SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID); });
+        if (!existing) {
+            this.checkingAuthorizationFor.push({ gatewayUID: gatewayUID, timestamp: Date.now() });
+            return;
+        }
+        existing.timestamp = Date.now();
+    };
+    /**
+     * @method
+     * @param {Buffer} gatewayUID - the gateway UID to remove from checking for authorization
+     * Removes the gateway UID from checking for authorization
+     */
+    SSGS.prototype.removeCheckingAuthorizationFor = function (gatewayUID) {
+        var index = this.checkingAuthorizationFor.findIndex(function (c) { return SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID); });
+        if (index != -1) {
+            this.checkingAuthorizationFor.splice(index, 1);
+        }
+    };
+    /**
+         * @method
+         * @param {object} parsedPacket - the parsed packet object from SSGSCP.parseSSGSCP
+         * @param {object} rinfo - the remote address information from the UDP socket
+         * Processes the incoming packet and calls the onmessage callback function
+         */
     SSGS.prototype.process = function (datagram, rinfo) {
-        var _a, _b;
         return __awaiter(this, void 0, void 0, function () {
-            var gatewayUID, client, callbackProvidedKey, key, parsedPacket, client_1, sentMessage, index, parsedMessage, pingPongSequenceNumber, payload;
+            var gatewayUID, client, callbackProvidedKey, key, parsedPacket, newClient_1, sentMessage, index, parsedMessage, pingPongSequenceNumber, payload;
             var _this = this;
+            var _a, _b;
             return __generator(this, function (_c) {
                 switch (_c.label) {
                     case 0:
@@ -264,7 +305,8 @@ var SSGS = /** @class */ (function () {
                         }
                         client = this.connectedClients.find(function (c) { return SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID); });
                         callbackProvidedKey = null;
-                        if (!!client) return [3 /*break*/, 2];
+                        if (!(!client && !this.isCheckingAuthorizationFor(gatewayUID))) return [3 /*break*/, 2];
+                        this.setCheckingAuthorizationFor(gatewayUID);
                         if (!!this.isAuthorizedGateway(gatewayUID)) return [3 /*break*/, 2];
                         logIfSSGSDebug('Connecting gateway is not authorized in config, trying onconnectionattempt callback');
                         return [4 /*yield*/, this.onconnectionattempt(gatewayUID, rinfo.address, rinfo.port)];
@@ -273,6 +315,7 @@ var SSGS = /** @class */ (function () {
                         if (!callbackProvidedKey) {
                             logIfSSGSDebug('onconnectionattempt did not authorize gateway UID: ' + SSGS.uidToString(gatewayUID) + ' from address: ' + rinfo.address);
                             this.sendCONNFAIL(rinfo, gatewayUID);
+                            this.removeCheckingAuthorizationFor(gatewayUID);
                             return [2 /*return*/];
                         }
                         logIfSSGSDebug('onconnectionattempt authorized gateway UID: ' + SSGS.uidToString(gatewayUID) + ' from address: ' + rinfo.address);
@@ -280,27 +323,37 @@ var SSGS = /** @class */ (function () {
                     case 2:
                         key = (_b = (_a = this.getGatewayKey(gatewayUID)) !== null && _a !== void 0 ? _a : callbackProvidedKey) !== null && _b !== void 0 ? _b : client === null || client === void 0 ? void 0 : client.key;
                         if (!key) {
-                            logIfSSGSDebug('Error: Could not find key for gateway UID: ' + gatewayUID);
+                            // Only log if we aren't currently checking auth (prevent log spam during auth process)
+                            // But if we are here and have no key, we failed.
+                            logIfSSGSDebug('Error: Could not find key for gateway UID: ' + SSGS.uidToString(gatewayUID));
+                            this.removeCheckingAuthorizationFor(gatewayUID);
                             return [2 /*return*/];
                         }
                         return [4 /*yield*/, SSGSCP.parseSSGSCP(datagram, key)];
                     case 3:
                         parsedPacket = _c.sent();
                         if (!parsedPacket) { // could not parse the packet
-                            logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Error: Could not parse packet: ' + SSGSCP.errMsg);
+                            logIfSSGSDebug(SSGS.uidToString(gatewayUID) + ': ' + 'Error: Could not parse packet: ' + SSGSCP.errMsg);
                             this.sendCONNFAIL(rinfo, gatewayUID);
+                            this.removeCheckingAuthorizationFor(gatewayUID);
                             return [2 /*return*/];
                         }
                         if (!parsedPacket.authSuccess) { // could not authenticate the packet using the key (invalid Message Authentication Code)
                             logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Error: Could not authenticate gateway');
                             this.sendCONNFAIL(rinfo, gatewayUID);
+                            this.removeCheckingAuthorizationFor(gatewayUID);
                             return [2 /*return*/];
                         }
-                        // if the client is not found, this is a new connection, so we need to add it to the connectedClients list
+                        // if the client was not found initially, check again now.
+                        // Another packet might have created the client while we were awaiting parseSSGSCP.
+                        if (!client) {
+                            client = this.connectedClients.find(function (c) { return SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID); });
+                        }
+                        // if the client is still not found, this is a new connection, so we need to add it to the connectedClients list
                         if (!client) {
                             if (parsedPacket.packetType === 1 /* PacketType.CONN */) {
-                                this.sendCONNACPT(rinfo, Buffer.from(key), parsedPacket.gatewayUID);
-                                client_1 = {
+                                this.sendCONNACPT(rinfo, key, parsedPacket.gatewayUID);
+                                newClient_1 = {
                                     gatewayUID: parsedPacket.gatewayUID,
                                     sourcePort: rinfo.port,
                                     remoteAddress: rinfo.address,
@@ -310,7 +363,7 @@ var SSGS = /** @class */ (function () {
                                     retransmissionTimeout: RETRANSMISSION_TIMEOUT_MS,
                                     sentMessages: [],
                                     receivedMessageIDsFIFO: [],
-                                    key: Buffer.from(key),
+                                    key: key,
                                     onmessage: function (parsedMessage) { },
                                     onupdate: function (parsedUpdate) { },
                                     onreconnect: function () { },
@@ -318,24 +371,32 @@ var SSGS = /** @class */ (function () {
                                     send: function (payload) { return __awaiter(_this, void 0, void 0, function () {
                                         return __generator(this, function (_a) {
                                             switch (_a.label) {
-                                                case 0: return [4 /*yield*/, this.sendMSG(client_1, 20 /* PacketType.MSGCONF */, payload)];
+                                                case 0: return [4 /*yield*/, this.sendMSG(newClient_1, 20 /* PacketType.MSGCONF */, payload)];
                                                 case 1: return [2 /*return*/, _a.sent()];
                                             }
                                         });
                                     }); }
                                 };
-                                this.connectedClients.push(client_1);
-                                this.onconnection(client_1);
+                                this.connectedClients.push(newClient_1);
+                                this.onconnection(newClient_1);
+                                // CRITICAL: Now that the client is safely in the list, we remove the protection flag.
+                                this.removeCheckingAuthorizationFor(gatewayUID);
                                 logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'New client connected');
                                 return [2 /*return*/];
                             }
                             else {
                                 logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Error: Client not found in connectedClients and packet type is not CONN');
                                 this.sendCONNFAIL(rinfo, parsedPacket.gatewayUID);
+                                this.removeCheckingAuthorizationFor(gatewayUID);
                                 return [2 /*return*/];
                             }
                         }
+                        // If we found the client (either initially or after the race check), clear the auth flag just in case
+                        this.removeCheckingAuthorizationFor(gatewayUID);
                         client.lastSeen = Date.now();
+                        // Update IP/Port in case the client roamed
+                        client.remoteAddress = rinfo.address;
+                        client.sourcePort = rinfo.port;
                         logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Received packet: ' + JSON.stringify(parsedPacket));
                         switch (parsedPacket.packetType) {
                             // CONNACPT is sent by the server to the client to indicate that the CONN packet was received
@@ -350,7 +411,7 @@ var SSGS = /** @class */ (function () {
                                 client.sourcePort = rinfo.port;
                                 logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Warning: Received CONN packet from already connected client, assuming client restarted');
                                 // send CONNACPT to client to indicate that we received the packet
-                                this.sendCONNACPT(rinfo, Buffer.from(key), parsedPacket.gatewayUID);
+                                this.sendCONNACPT(rinfo, key, parsedPacket.gatewayUID);
                                 setTimeout(function () {
                                     client.onreconnect();
                                 }, client.retransmissionTimeout);
@@ -378,7 +439,7 @@ var SSGS = /** @class */ (function () {
                                 if (client.receivedMessageIDsFIFO.includes(parsedPacket.packetID)) {
                                     logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Warning: Received duplicate MSGSTATUS packet ID ' + parsedPacket.packetID);
                                     // send RCPTOK to client to indicate that we received the packet
-                                    this.sendRCPTOK(parsedPacket.packetID, rinfo, Buffer.from(key), parsedPacket.gatewayUID);
+                                    this.sendRCPTOK(parsedPacket.packetID, rinfo, key, parsedPacket.gatewayUID);
                                     return [2 /*return*/];
                                 }
                                 else {
@@ -388,7 +449,7 @@ var SSGS = /** @class */ (function () {
                                     }
                                 }
                                 // send RCPTOK to client to indicate that we received the packet
-                                this.sendRCPTOK(parsedPacket.packetID, rinfo, Buffer.from(key), parsedPacket.gatewayUID);
+                                this.sendRCPTOK(parsedPacket.packetID, rinfo, key, parsedPacket.gatewayUID);
                                 parsedMessage = SSProtocols.parse(parsedPacket);
                                 if (!parsedMessage) {
                                     logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Error: Could not parse message: ' + parsedPacket.payload.subarray(0, 100).toString('hex'));
@@ -452,7 +513,7 @@ var SSGS = /** @class */ (function () {
                         return [4 /*yield*/, SSGSCP.packSSGSCP(fields, Buffer.alloc(32))];
                     case 1:
                         packedPacket = _a.sent();
-                        this.socket.send(packedPacket, rinfo.port, rinfo.address);
+                        this.socket.send(new Uint8Array(packedPacket), rinfo.port, rinfo.address);
                         return [2 /*return*/];
                 }
             });
@@ -478,7 +539,7 @@ var SSGS = /** @class */ (function () {
                         return [4 /*yield*/, SSGSCP.packSSGSCP(fields, key)];
                     case 1:
                         packedPacket = _a.sent();
-                        this.socket.send(packedPacket, rinfo.port, rinfo.address);
+                        this.socket.send(new Uint8Array(packedPacket), rinfo.port, rinfo.address);
                         logIfSSGSDebug('Sent CONNACPT to ' + rinfo.address + ':' + rinfo.port);
                         return [2 /*return*/];
                 }
@@ -505,7 +566,7 @@ var SSGS = /** @class */ (function () {
                         return [4 /*yield*/, SSGSCP.packSSGSCP(fields, key)];
                     case 1:
                         packedPacket = _a.sent();
-                        this.socket.send(packedPacket, rinfo.port, rinfo.address);
+                        this.socket.send(new Uint8Array(packedPacket), rinfo.port, rinfo.address);
                         return [2 /*return*/];
                 }
             });
@@ -604,7 +665,7 @@ var SSGS = /** @class */ (function () {
     SSGS.gatewayUIDsMatch = function (gatewayUID1, gatewayUID2) {
         if (!gatewayUID1 || !gatewayUID2) // should not be null or undefined
             return false;
-        if (gatewayUID1.length != 4 && gatewayUID2.length != 4) // should be 4 bytes long
+        if (gatewayUID1.length != 4 || gatewayUID2.length != 4) // should be 4 bytes long
             return false;
         // compare each byte
         for (var i = 0; i < 4; i++) {

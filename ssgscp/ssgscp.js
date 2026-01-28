@@ -8,8 +8,8 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 var __generator = (this && this.__generator) || function (thisArg, body) {
-    var _ = { label: 0, sent: function() { if (t[0] & 1) throw t[1]; return t[1]; }, trys: [], ops: [] }, f, y, t, g;
-    return g = { next: verb(0), "throw": verb(1), "return": verb(2) }, typeof Symbol === "function" && (g[Symbol.iterator] = function() { return this; }), g;
+    var _ = { label: 0, sent: function() { if (t[0] & 1) throw t[1]; return t[1]; }, trys: [], ops: [] }, f, y, t, g = Object.create((typeof Iterator === "function" ? Iterator : Object).prototype);
+    return g.next = verb(0), g["throw"] = verb(1), g["return"] = verb(2), typeof Symbol === "function" && (g[Symbol.iterator] = function() { return this; }), g;
     function verb(n) { return function (v) { return step([n, v]); }; }
     function step(op) {
         if (f) throw new TypeError("Generator is already executing.");
@@ -35,13 +35,14 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
     }
 };
 import * as crypto from 'node:crypto';
+import { Buffer } from "node:buffer";
 ;
 ;
 /**
  * This class defines various static methods for parsing and constructing
  * SSGSCP packets
  */
-export var SSGSCP = /** @class */ (function () {
+var SSGSCP = /** @class */ (function () {
     function SSGSCP() {
     }
     /**
@@ -88,7 +89,7 @@ export var SSGSCP = /** @class */ (function () {
                         encryptedPortionPlaintext.set(packet.payload, 8);
                         iv = Buffer.alloc(16);
                         iv.set(crypto.randomBytes(8), 0);
-                        return [4 /*yield*/, crypto.subtle.importKey("raw", key, "AES-CTR", true, ["encrypt", "decrypt"])];
+                        return [4 /*yield*/, crypto.subtle.importKey("raw", new Uint8Array(key), "AES-CTR", true, ["encrypt", "decrypt"])];
                     case 1:
                         importedKey = _c.sent();
                         _b = (_a = Buffer).from;
@@ -129,7 +130,7 @@ export var SSGSCP = /** @class */ (function () {
                         encryptedPortion = datagram.subarray(18);
                         iv16 = Buffer.alloc(16);
                         iv16.set(iv8, 0);
-                        return [4 /*yield*/, crypto.subtle.importKey("raw", key, "AES-CTR", true, ["encrypt", "decrypt"])];
+                        return [4 /*yield*/, crypto.subtle.importKey("raw", new Uint8Array(key), "AES-CTR", true, ["encrypt", "decrypt"])];
                     case 1:
                         importedKey = _c.sent();
                         _b = (_a = Buffer).from;
@@ -137,7 +138,7 @@ export var SSGSCP = /** @class */ (function () {
                                 name: "AES-CTR",
                                 counter: iv16,
                                 length: 64
-                            }, importedKey, encryptedPortion)];
+                            }, importedKey, new Uint8Array(encryptedPortion))];
                     case 2:
                         decryptedPortion = _b.apply(_a, [_c.sent()]);
                         packetType = decryptedPortion[0];
@@ -208,6 +209,7 @@ export var SSGSCP = /** @class */ (function () {
     SSGSCP.errMsg = 'no error';
     return SSGSCP;
 }());
+export { SSGSCP };
 ;
 /**
  * Checks if a buffer contains a given array of values

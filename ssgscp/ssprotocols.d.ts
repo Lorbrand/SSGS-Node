@@ -1,6 +1,6 @@
-/// <reference types="node" />
 import { ParsedSSGSCPPacket } from "./ssgscp";
 import { MessageSubtype } from "./ssgscp";
+import { Buffer } from "node:buffer";
 export type SensorSealUpdate = {
     sensorSealUID: Buffer;
     viaGatewayUID: Buffer;
