@@ -79,6 +79,7 @@ export type Client = { // the client state machine
     sentMessages: Array<SentMessage>; // the list of sent messages
     receivedMessageIDsFIFO: Array<number>; // the list of received message IDs, needed for duplicate detection, max length is RECV_MSG_FIFO_MAX_LEN
     key: Buffer; // the encryption key
+    _processSeq: number; // monotonic counter to detect stale async handlers after await points
     onmessage: (update: ParsedMessage) => void; // the callback function to handle incoming messages from the gateway
     onupdate: (update: SensorSealUpdate) => void; // the callback function to handle incoming Sensor Seal updates
     onreconnect: () => void; // the callback function to handle a client reconnecting
@@ -390,12 +391,23 @@ class SSGS {
             // Only log if we aren't currently checking auth (prevent log spam during auth process)
             // But if we are here and have no key, we failed.
             logIfSSGSDebug('Error: Could not find key for gateway UID: ' + SSGS.uidToString(gatewayUID));
-            this.removeCheckingAuthorizationFor(gatewayUID); 
+            this.removeCheckingAuthorizationFor(gatewayUID);
             return;
         }
 
+        // Increment the process sequence counter BEFORE the async gap. After the await,
+        // we check if our seq still matches - if not, a newer packet has arrived and we
+        // must not overwrite the client's address with our (now stale) rinfo.
+        // This prevents the IP clobbering bug where a failover IP change causes the
+        // server to send retransmissions to the old IP indefinitely.
+        let myProcessSeq: number | undefined;
+        if (client) {
+            client._processSeq = (client._processSeq || 0) + 1;
+            myProcessSeq = client._processSeq;
+        }
+
         // try parse the packet using the key
-        // This is ASYNC. A race condition can occur here if we aren't careful.
+        // This is ASYNC - the event loop yields here, so other packet handlers can run.
         const parsedPacket = await SSGSCP.parseSSGSCP(datagram, key);
 
         if (!parsedPacket) { // could not parse the packet
@@ -433,6 +445,7 @@ class SSGS {
                     sentMessages: [],
                     receivedMessageIDsFIFO: [],
                     key: key,
+                    _processSeq: 0,
                     onmessage: (parsedMessage: ParsedMessage) => { },
                     onupdate: (parsedUpdate: SensorSealUpdate) => { },
                     onreconnect: () => { },
@@ -461,10 +474,39 @@ class SSGS {
         // If we found the client (either initially or after the race check), clear the auth flag just in case
         this.removeCheckingAuthorizationFor(gatewayUID);
 
-        client.lastSeen = Date.now();
-        // Update IP/Port in case the client roamed
-        client.remoteAddress = rinfo.address;
-        client.sourcePort = rinfo.port;
+        // Only update the client's address if no newer packet handler has run since we
+        // started our await. This prevents stale handlers (e.g. from a previous IP before
+        // a failover) from overwriting the address that a newer handler already set.
+        const isStaleHandler = myProcessSeq !== undefined && client._processSeq !== myProcessSeq;
+
+        if (!isStaleHandler) {
+            // Check if the client's address/port actually changed
+            const addressChanged = client.remoteAddress !== rinfo.address || client.sourcePort !== rinfo.port;
+
+            if (addressChanged && client.sentMessages.length > 0) {
+                // Address changed while messages were pending - those messages were being
+                // retransmitted to the old address and will never be ACK'd. Clear them
+                // and let the application layer re-send if needed.
+                logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' +
+                    'Client address changed from ' + client.remoteAddress + ':' + client.sourcePort +
+                    ' to ' + rinfo.address + ':' + rinfo.port +
+                    ', clearing ' + client.sentMessages.length + ' stale pending messages');
+                for (const msg of client.sentMessages) {
+                    msg.resolve(false);
+                }
+                client.sentMessages = [];
+            }
+
+            client.lastSeen = Date.now();
+            client.remoteAddress = rinfo.address;
+            client.sourcePort = rinfo.port;
+        } else {
+            // Stale handler - a newer packet already updated the address.
+            // Still update lastSeen since this packet proves the client is alive.
+            client.lastSeen = Date.now();
+            logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' +
+                'Skipping address update from stale handler (current: ' + client.remoteAddress + ', stale: ' + rinfo.address + ')');
+        }
 
         logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Received packet: ' + JSON.stringify(parsedPacket));
 
@@ -694,8 +736,19 @@ class SSGS {
      * Loads and parses the configuration file and sets up the authorized gateways and key properties
      */
     async loadConfig(configFilePath: string) {
-        // load the config file
-        this.configFile = JSON.parse(await fs.readFile(configFilePath, 'utf8'));
+        // load the config file - if it doesn't exist, start with no pre-authorized gateways
+        // (connections can still be authorized dynamically via the onconnectionattempt callback)
+        try {
+            this.configFile = JSON.parse(await fs.readFile(configFilePath, 'utf8'));
+        } catch (e: any) {
+            if (e.code === 'ENOENT') {
+                console.log('SSGS: Config file not found (' + configFilePath + '), starting with no pre-authorized gateways. Use onconnectionattempt callback to authorize dynamically.');
+                this.configFile = { key: '', authorized_gateways: [] };
+                this.authorizedGateways = [];
+                return;
+            }
+            throw e; // re-throw JSON parse errors or permission errors
+        }
         this.authorizedGateways = [];
 
         // parse the authorized gateways

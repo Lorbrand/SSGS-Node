@@ -292,11 +292,11 @@ var SSGS = /** @class */ (function () {
          */
     SSGS.prototype.process = function (datagram, rinfo) {
         return __awaiter(this, void 0, void 0, function () {
-            var gatewayUID, client, callbackProvidedKey, key, parsedPacket, newClient_1, sentMessage, index, parsedMessage, pingPongSequenceNumber, payload;
+            var gatewayUID, client, callbackProvidedKey, key, myProcessSeq, parsedPacket, newClient_1, isStaleHandler, addressChanged, _i, _a, msg, sentMessage, index, parsedMessage, pingPongSequenceNumber, payload;
             var _this = this;
-            var _a, _b;
-            return __generator(this, function (_c) {
-                switch (_c.label) {
+            var _b, _c;
+            return __generator(this, function (_d) {
+                switch (_d.label) {
                     case 0:
                         gatewayUID = SSGSCP.parsePacketGatewayUID(datagram);
                         if (!gatewayUID) {
@@ -311,7 +311,7 @@ var SSGS = /** @class */ (function () {
                         logIfSSGSDebug('Connecting gateway is not authorized in config, trying onconnectionattempt callback');
                         return [4 /*yield*/, this.onconnectionattempt(gatewayUID, rinfo.address, rinfo.port)];
                     case 1:
-                        callbackProvidedKey = _c.sent();
+                        callbackProvidedKey = _d.sent();
                         if (!callbackProvidedKey) {
                             logIfSSGSDebug('onconnectionattempt did not authorize gateway UID: ' + SSGS.uidToString(gatewayUID) + ' from address: ' + rinfo.address);
                             this.sendCONNFAIL(rinfo, gatewayUID);
@@ -319,9 +319,9 @@ var SSGS = /** @class */ (function () {
                             return [2 /*return*/];
                         }
                         logIfSSGSDebug('onconnectionattempt authorized gateway UID: ' + SSGS.uidToString(gatewayUID) + ' from address: ' + rinfo.address);
-                        _c.label = 2;
+                        _d.label = 2;
                     case 2:
-                        key = (_b = (_a = this.getGatewayKey(gatewayUID)) !== null && _a !== void 0 ? _a : callbackProvidedKey) !== null && _b !== void 0 ? _b : client === null || client === void 0 ? void 0 : client.key;
+                        key = (_c = (_b = this.getGatewayKey(gatewayUID)) !== null && _b !== void 0 ? _b : callbackProvidedKey) !== null && _c !== void 0 ? _c : client === null || client === void 0 ? void 0 : client.key;
                         if (!key) {
                             // Only log if we aren't currently checking auth (prevent log spam during auth process)
                             // But if we are here and have no key, we failed.
@@ -329,9 +329,13 @@ var SSGS = /** @class */ (function () {
                             this.removeCheckingAuthorizationFor(gatewayUID);
                             return [2 /*return*/];
                         }
+                        if (client) {
+                            client._processSeq = (client._processSeq || 0) + 1;
+                            myProcessSeq = client._processSeq;
+                        }
                         return [4 /*yield*/, SSGSCP.parseSSGSCP(datagram, key)];
                     case 3:
-                        parsedPacket = _c.sent();
+                        parsedPacket = _d.sent();
                         if (!parsedPacket) { // could not parse the packet
                             logIfSSGSDebug(SSGS.uidToString(gatewayUID) + ': ' + 'Error: Could not parse packet: ' + SSGSCP.errMsg);
                             this.sendCONNFAIL(rinfo, gatewayUID);
@@ -364,6 +368,7 @@ var SSGS = /** @class */ (function () {
                                     sentMessages: [],
                                     receivedMessageIDsFIFO: [],
                                     key: key,
+                                    _processSeq: 0,
                                     onmessage: function (parsedMessage) { },
                                     onupdate: function (parsedUpdate) { },
                                     onreconnect: function () { },
@@ -393,10 +398,34 @@ var SSGS = /** @class */ (function () {
                         }
                         // If we found the client (either initially or after the race check), clear the auth flag just in case
                         this.removeCheckingAuthorizationFor(gatewayUID);
-                        client.lastSeen = Date.now();
-                        // Update IP/Port in case the client roamed
-                        client.remoteAddress = rinfo.address;
-                        client.sourcePort = rinfo.port;
+                        isStaleHandler = myProcessSeq !== undefined && client._processSeq !== myProcessSeq;
+                        if (!isStaleHandler) {
+                            addressChanged = client.remoteAddress !== rinfo.address || client.sourcePort !== rinfo.port;
+                            if (addressChanged && client.sentMessages.length > 0) {
+                                // Address changed while messages were pending - those messages were being
+                                // retransmitted to the old address and will never be ACK'd. Clear them
+                                // and let the application layer re-send if needed.
+                                logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' +
+                                    'Client address changed from ' + client.remoteAddress + ':' + client.sourcePort +
+                                    ' to ' + rinfo.address + ':' + rinfo.port +
+                                    ', clearing ' + client.sentMessages.length + ' stale pending messages');
+                                for (_i = 0, _a = client.sentMessages; _i < _a.length; _i++) {
+                                    msg = _a[_i];
+                                    msg.resolve(false);
+                                }
+                                client.sentMessages = [];
+                            }
+                            client.lastSeen = Date.now();
+                            client.remoteAddress = rinfo.address;
+                            client.sourcePort = rinfo.port;
+                        }
+                        else {
+                            // Stale handler - a newer packet already updated the address.
+                            // Still update lastSeen since this packet proves the client is alive.
+                            client.lastSeen = Date.now();
+                            logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' +
+                                'Skipping address update from stale handler (current: ' + client.remoteAddress + ', stale: ' + rinfo.address + ')');
+                        }
                         logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Received packet: ' + JSON.stringify(parsedPacket));
                         switch (parsedPacket.packetType) {
                             // CONNACPT is sent by the server to the client to indicate that the CONN packet was received
@@ -625,17 +654,27 @@ var SSGS = /** @class */ (function () {
      */
     SSGS.prototype.loadConfig = function (configFilePath) {
         return __awaiter(this, void 0, void 0, function () {
-            var _a, _b, _c, _i, _d, gateway, uid, key;
+            var _a, _b, _c, e_1, _i, _d, gateway, uid, key;
             return __generator(this, function (_e) {
                 switch (_e.label) {
                     case 0:
-                        // load the config file
+                        _e.trys.push([0, 2, , 3]);
                         _a = this;
                         _c = (_b = JSON).parse;
                         return [4 /*yield*/, fs.readFile(configFilePath, 'utf8')];
                     case 1:
-                        // load the config file
                         _a.configFile = _c.apply(_b, [_e.sent()]);
+                        return [3 /*break*/, 3];
+                    case 2:
+                        e_1 = _e.sent();
+                        if (e_1.code === 'ENOENT') {
+                            console.log('SSGS: Config file not found (' + configFilePath + '), starting with no pre-authorized gateways. Use onconnectionattempt callback to authorize dynamically.');
+                            this.configFile = { key: '', authorized_gateways: [] };
+                            this.authorizedGateways = [];
+                            return [2 /*return*/];
+                        }
+                        throw e_1; // re-throw JSON parse errors or permission errors
+                    case 3:
                         this.authorizedGateways = [];
                         // parse the authorized gateways
                         for (_i = 0, _d = this.configFile.authorized_gateways; _i < _d.length; _i++) {

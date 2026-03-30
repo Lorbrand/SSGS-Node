@@ -34,6 +34,7 @@ export type Client = {
     sentMessages: Array<SentMessage>;
     receivedMessageIDsFIFO: Array<number>;
     key: Buffer;
+    _processSeq: number;
     onmessage: (update: ParsedMessage) => void;
     onupdate: (update: SensorSealUpdate) => void;
     onreconnect: () => void;
