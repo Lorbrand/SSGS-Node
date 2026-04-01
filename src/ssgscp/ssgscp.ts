@@ -1,4 +1,12 @@
 
+/*
+ * Lorbrand Sensor Seal Gateway Server
+ * Copyright (c) 2023-2026 Lorbrand (Pty) Ltd
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this repository.
+ */
+
 import * as crypto from 'node:crypto';
 import { Buffer } from "node:buffer";
 
@@ -49,8 +57,9 @@ export type ParsedSSGSCPPacket = {
  */
 export class SSGSCP {
 
-    static PACKET_IDENTIFIER = Buffer.from([83, 83, 71, 83, 67, 80]); // Packet Identifier is 6 bytes, "SSGSCP"
-
+    static readonly PACKET_IDENTIFIER = Buffer.from([83, 83, 71, 83, 67, 80]); // Packet Identifier is 6 bytes, "SSGSCP"
+    static readonly PSK_LEN_BYTES = 32 as const;
+ 
     /**
     * Packs and encrypts SSGSCP fields into their packet form
     * @param {Object} packet an object containing the SSGSCP packet fields (packetType, gatewayUID, packetID, payload)

@@ -1,26 +1,10 @@
 /*
-
-    Lorbrand Sensor Seal Gateway Server
-    --------------------------------------------------------------
-
-    Copyright (C) 2023-2026 Lorbrand (Pty) Ltd
-
-    https://github.com/Lorbrand/SSGS-Node#readme
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-*/
+ * Lorbrand Sensor Seal Gateway Server
+ * Copyright (c) 2023-2026 Lorbrand (Pty) Ltd
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this repository.
+ */
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -292,7 +276,7 @@ var SSGS = /** @class */ (function () {
          */
     SSGS.prototype.process = function (datagram, rinfo) {
         return __awaiter(this, void 0, void 0, function () {
-            var gatewayUID, client, callbackProvidedKey, key, myProcessSeq, parsedPacket, newClient_1, isStaleHandler, addressChanged, _i, _a, msg, sentMessage, index, parsedMessage, pingPongSequenceNumber, payload;
+            var gatewayUID, client, callbackProvidedKey, failed, key, myProcessSeq, parsedPacket, newClient_1, isStaleHandler, addressChanged, _i, _a, msg, sentMessage, index, parsedMessage, pingPongSequenceNumber, payload;
             var _this = this;
             var _b, _c;
             return __generator(this, function (_d) {
@@ -312,8 +296,16 @@ var SSGS = /** @class */ (function () {
                         return [4 /*yield*/, this.onconnectionattempt(gatewayUID, rinfo.address, rinfo.port)];
                     case 1:
                         callbackProvidedKey = _d.sent();
+                        failed = false;
                         if (!callbackProvidedKey) {
                             logIfSSGSDebug('onconnectionattempt did not authorize gateway UID: ' + SSGS.uidToString(gatewayUID) + ' from address: ' + rinfo.address);
+                            failed = true;
+                        }
+                        else if (callbackProvidedKey.length != SSGSCP.PSK_LEN_BYTES) {
+                            logIfSSGSDebug('onconnectionattempt provided invalid PSK for gateway UID: ' + SSGS.uidToString(gatewayUID));
+                            failed = true;
+                        }
+                        if (failed) {
                             this.sendCONNFAIL(rinfo, gatewayUID);
                             this.removeCheckingAuthorizationFor(gatewayUID);
                             return [2 /*return*/];

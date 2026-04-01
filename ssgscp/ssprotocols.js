@@ -1,3 +1,10 @@
+/*
+ * Lorbrand Sensor Seal Gateway Server
+ * Copyright (c) 2023-2026 Lorbrand (Pty) Ltd
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this repository.
+ */
 function buffersEqual(a, b) {
     if (a.length !== b.length) {
         return false;

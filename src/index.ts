@@ -1,26 +1,10 @@
 /*
-
-    Lorbrand Sensor Seal Gateway Server
-    --------------------------------------------------------------
-
-    Copyright (C) 2023-2026 Lorbrand (Pty) Ltd
-
-    https://github.com/Lorbrand/SSGS-Node#readme
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-*/
+ * Lorbrand Sensor Seal Gateway Server
+ * Copyright (c) 2023-2026 Lorbrand (Pty) Ltd
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this repository.
+ */
 
 let __SSGS_DEBUG: boolean = false;
 
@@ -343,12 +327,12 @@ class SSGS {
         }
     }
 
-/**
-     * @method
-     * @param {object} parsedPacket - the parsed packet object from SSGSCP.parseSSGSCP
-     * @param {object} rinfo - the remote address information from the UDP socket
-     * Processes the incoming packet and calls the onmessage callback function
-     */
+    /**
+         * @method
+         * @param {object} parsedPacket - the parsed packet object from SSGSCP.parseSSGSCP
+         * @param {object} rinfo - the remote address information from the UDP socket
+         * Processes the incoming packet and calls the onmessage callback function
+         */
     async process(datagram: Buffer, rinfo: dgram.RemoteInfo) {
 
         const gatewayUID = SSGSCP.parsePacketGatewayUID(datagram);
@@ -364,7 +348,7 @@ class SSGS {
 
         if (!client && !this.isCheckingAuthorizationFor(gatewayUID)) { // client not found, check if gateway is authorized
             this.setCheckingAuthorizationFor(gatewayUID);
-            
+
             // Note: We keep the CheckingAuthorizationFor flag active until the very end of the connection process
             // to prevent race conditions where multiple CONN packets try to authorize simultaneously.
 
@@ -372,9 +356,18 @@ class SSGS {
                 logIfSSGSDebug('Connecting gateway is not authorized in config, trying onconnectionattempt callback');
 
                 callbackProvidedKey = await this.onconnectionattempt(gatewayUID, rinfo.address, rinfo.port);
-                
+
+                let failed = false;
+
                 if (!callbackProvidedKey) {
                     logIfSSGSDebug('onconnectionattempt did not authorize gateway UID: ' + SSGS.uidToString(gatewayUID) + ' from address: ' + rinfo.address);
+                    failed = true;
+                } else if (callbackProvidedKey.length != SSGSCP.PSK_LEN_BYTES) {
+                    logIfSSGSDebug('onconnectionattempt provided invalid PSK for gateway UID: ' + SSGS.uidToString(gatewayUID));
+                    failed = true;
+                }
+
+                if (failed) {
                     this.sendCONNFAIL(rinfo, gatewayUID);
                     this.removeCheckingAuthorizationFor(gatewayUID);
                     return;
@@ -427,7 +420,7 @@ class SSGS {
         // if the client was not found initially, check again now.
         // Another packet might have created the client while we were awaiting parseSSGSCP.
         if (!client) {
-             client = this.connectedClients.find((c) => SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID));
+            client = this.connectedClients.find((c) => SSGS.gatewayUIDsMatch(c.gatewayUID, gatewayUID));
         }
 
         // if the client is still not found, this is a new connection, so we need to add it to the connectedClients list
@@ -457,10 +450,10 @@ class SSGS {
 
                 this.connectedClients.push(newClient);
                 this.onconnection(newClient);
-                
+
                 // CRITICAL: Now that the client is safely in the list, we remove the protection flag.
                 this.removeCheckingAuthorizationFor(gatewayUID);
-                
+
                 logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'New client connected');
                 return;
             } else {
@@ -470,7 +463,7 @@ class SSGS {
                 return;
             }
         }
-        
+
         // If we found the client (either initially or after the race check), clear the auth flag just in case
         this.removeCheckingAuthorizationFor(gatewayUID);
 
@@ -597,7 +590,7 @@ class SSGS {
                     client.send(payload);
                     return;
                 }
-                
+
                 logIfSSGSDebug(SSGS.uidToString(parsedPacket.gatewayUID) + ': ' + 'Received message: ' + JSON.stringify(parsedMessage) + ' from gateway ' + SSGS.uidToString(parsedPacket.gatewayUID));
                 client.onmessage(parsedMessage);
 

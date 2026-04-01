@@ -1,3 +1,10 @@
+/*
+ * Lorbrand Sensor Seal Gateway Server
+ * Copyright (c) 2023-2026 Lorbrand (Pty) Ltd
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this repository.
+ */
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -206,6 +213,7 @@ var SSGSCP = /** @class */ (function () {
         return Buffer.from([value >> 8, value & 0xff]);
     };
     SSGSCP.PACKET_IDENTIFIER = Buffer.from([83, 83, 71, 83, 67, 80]); // Packet Identifier is 6 bytes, "SSGSCP"
+    SSGSCP.PSK_LEN_BYTES = 32;
     SSGSCP.errMsg = 'no error';
     return SSGSCP;
 }());

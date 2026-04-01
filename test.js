@@ -1,5 +1,3 @@
-
-
 import SSGS from './index.js';
 
 // Create a new Sensor Seal Gateway Server that listens on UDP port 1818

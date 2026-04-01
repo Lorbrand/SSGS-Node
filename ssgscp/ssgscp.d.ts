@@ -33,7 +33,8 @@ export type ParsedSSGSCPPacket = {
  * SSGSCP packets
  */
 export declare class SSGSCP {
-    static PACKET_IDENTIFIER: Buffer<ArrayBuffer>;
+    static readonly PACKET_IDENTIFIER: Buffer<ArrayBuffer>;
+    static readonly PSK_LEN_BYTES: 32;
     /**
     * Packs and encrypts SSGSCP fields into their packet form
     * @param {Object} packet an object containing the SSGSCP packet fields (packetType, gatewayUID, packetID, payload)
